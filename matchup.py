@@ -44,6 +44,7 @@ STAT_IDS = {0: "PTS", 1: "BLK", 2: "STL", 3: "AST", 6: "REB",
             13: "FGM", 14: "FGA", 15: "FTM", 16: "FTA", 17: "3PM"}
 SLOT_NAMES = {0: "PG", 1: "SG", 2: "SF", 3: "PF", 4: "C", 5: "G", 6: "F",
               7: "SG/SF", 8: "G/F", 9: "PF/C", 10: "F/C", 11: "UTIL", 12: "BE", 13: "IR"}
+DEBUG_PLAYER = os.environ.get("DEBUG_PLAYER", "Jalen Johnson")  # logs which stat entries were used
 POS_NAMES = {0: "PG", 1: "SG", 2: "SF", 3: "PF", 4: "C"}  # eligibleSlots ids
 SPLIT_NAMES = {0: "season", 1: "last7", 2: "last15", 3: "last30"}
 
@@ -80,12 +81,20 @@ def player_averages(player):
         if not avg:
             continue
         src, split, season = s.get("statSourceId"), s.get("statSplitTypeId"), s.get("seasonId")
-        if src == 1:
+        # ESPN sends several entries per player (projections and actuals across seasons
+        # and date splits). Only take full-season projections for the current season,
+        # current-season actuals by split, and full-season actuals for past seasons.
+        if src == 1 and split == 0 and season == CONFIG["SEASON"]:
             name = "projected"
-        elif src == 0 and split in SPLIT_NAMES:
-            name = SPLIT_NAMES[split] if season == CONFIG["SEASON"] else f"season{season - 1}-{str(season)[2:]}"
+        elif src == 0 and season == CONFIG["SEASON"] and split in SPLIT_NAMES:
+            name = SPLIT_NAMES[split]
+        elif src == 0 and split == 0 and season and season < CONFIG["SEASON"]:
+            name = f"season{season - 1}-{str(season)[2:]}"
         else:
             continue
+        if DEBUG_PLAYER and DEBUG_PLAYER in player.get("fullName", ""):
+            print(f"  {player['fullName']}: {name} (season {season}, src {src}, split {split}) "
+                  f"AST {avg.get('3', avg.get(3))} PTS {avg.get('0', avg.get(0))}")
         vals = {k: float(avg.get(str(i), avg.get(i, 0)) or 0) for i, k in STAT_IDS.items()}
         if any(vals.values()):
             out[name] = {k: round(v, 3) for k, v in vals.items()}
@@ -322,9 +331,15 @@ h2 span{font-size:12px;color:var(--mute);font-weight:400}
 .pl .nm b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
 .pl .nm em{font-style:normal;font-size:12px;color:var(--mute)}
 .inj{font-size:10px;font-weight:700;color:var(--lose);margin-left:4px}
-.gp{flex:none;text-align:right;font-size:12px;color:var(--mute);width:96px}
+.gp{flex:none;text-align:right;font-size:11px;color:var(--mute);width:52px}
 .gp b{display:block;font-size:17px;color:var(--ink)}
-.line{font-size:11px;color:var(--mute);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pl{flex-wrap:wrap;row-gap:4px}
+.line{flex:0 0 100%;display:grid;grid-template-columns:1.3fr 1.3fr repeat(6,minmax(0,1fr));gap:2px;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
+.line span{text-align:center;white-space:nowrap}
+.line.none{display:block;color:var(--mute);font-size:11px}
+.pl.hdr{cursor:default;padding:0 4px 4px;position:sticky;top:0;background:var(--card);z-index:1}
+.pl.hdr .line{margin:0;color:var(--mute);font-size:10px;font-weight:700;letter-spacing:.02em}
+.pl.hdr .slot{background:none}
 .note{font-size:12px;color:var(--mute);margin-top:8px}
 </style>
 </head>
@@ -478,12 +493,16 @@ function renderList(side, el) {
     const on = start[side].has(p.id), w = weekly(p), g = gamesOf(p);
     const slot = p.slot === IR ? "IR" : on ? (a.map[p.id] || "??") : "BE";
     const inj = p.injury && p.injury !== "ACTIVE" ? `<span class="inj">${p.injury.replace(/_/g," ").replace("DAY TO DAY","DTD")}</span>` : "";
-    const line = g ? `${w.PTS.toFixed(0)} pts · ${w.REB.toFixed(0)} reb · ${w.AST.toFixed(0)} ast · ${w.STL.toFixed(1)} stl · ${w.BLK.toFixed(1)} blk · ${w["3PM"].toFixed(1)} 3pm` : "no games counted";
+    const pct = (m, a) => a ? (m / a).toFixed(3).replace(/^0/, "") : "—";
+    const num = v => v >= 10 ? v.toFixed(0) : v.toFixed(1);
+    const vals = [pct(w.FGM, w.FGA), pct(w.FTM, w.FTA), num(w["3PM"]), num(w.REB), num(w.AST), num(w.STL), num(w.BLK), num(w.PTS)];
+    const line = g ? `<div class="line">${vals.map(v => `<span>${v}</span>`).join("")}</div>` : `<div class="line none">no games counted</div>`;
     return `<div class="pl ${on ? "start" : "bench"}" data-side="${side}" data-id="${p.id}">
       <div class="slot">${slot}</div>
-      <div class="nm"><b>${esc(p.name)}${inj}</b><em>${esc(p.team)} · ${esc(p.pos)}</em><div class="line">${line}</div></div>
-      <div class="gp"><b>${g}</b>games${$("gmode").value === "remaining" ? "" : (p.remaining !== p.games ? ` · ${p.remaining} left` : "")}</div></div>`;
+      <div class="nm"><b>${esc(p.name)}${inj}</b><em>${esc(p.team)} · ${esc(p.pos)}</em></div>
+      <div class="gp"><b>${g}</b>games${$("gmode").value === "remaining" ? "" : (p.remaining !== p.games ? ` · ${p.remaining} left` : "")}</div>${line}</div>`;
   }).join("");
+  el.innerHTML = `<div class="pl hdr"><div class="line">${CATS.map(c => `<span>${c}</span>`).join("")}</div></div>` + el.innerHTML;
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
@@ -509,7 +528,7 @@ function render() {
 }
 
 document.addEventListener("click", e => {
-  const row = e.target.closest(".pl"); if (!row) return;
+  const row = e.target.closest(".pl:not(.hdr)"); if (!row) return;
   const side = row.dataset.side, id = +row.dataset.id;
   start[side].has(id) ? start[side].delete(id) : start[side].add(id);
   render();
