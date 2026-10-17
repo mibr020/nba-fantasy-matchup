@@ -44,7 +44,7 @@ STAT_IDS = {0: "PTS", 1: "BLK", 2: "STL", 3: "AST", 6: "REB",
             13: "FGM", 14: "FGA", 15: "FTM", 16: "FTA", 17: "3PM"}
 SLOT_NAMES = {0: "PG", 1: "SG", 2: "SF", 3: "PF", 4: "C", 5: "G", 6: "F",
               7: "SG/SF", 8: "G/F", 9: "PF/C", 10: "F/C", 11: "UTIL", 12: "BE", 13: "IR"}
-POS_NAMES = {1: "PG", 2: "SG", 3: "SF", 4: "PF", 5: "C"}
+POS_NAMES = {0: "PG", 1: "SG", 2: "SF", 3: "PF", 4: "C"}  # eligibleSlots ids
 SPLIT_NAMES = {0: "season", 1: "last7", 2: "last15", 3: "last30"}
 
 
@@ -99,6 +99,30 @@ def build_model(league, pro, week_override=None, team_override=None):
     period = int(week_override or status.get("currentMatchupPeriod") or 1)
     scoring_periods = [int(x) for x in sched["matchupPeriods"][str(period)]]
     today_sp = int(league.get("scoringPeriodId") or status.get("latestScoringPeriod") or scoring_periods[0])
+
+    # ESPN matchups run through Sunday (US Eastern). If the settings mapping comes back
+    # short (seen pre-season: matchup 1 -> opening day only), extend it by game date.
+    from datetime import timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except Exception:
+        et = timezone(timedelta(hours=-4))
+    sp_date = {}
+    for t in pro["settings"]["proTeams"]:
+        for sp, gl in (t.get("proGamesByScoringPeriod") or {}).items():
+            for g in gl:
+                if g.get("date"):
+                    d = datetime.fromtimestamp(g["date"] / 1000, et).date()
+                    sp_date[int(sp)] = min(sp_date.get(int(sp), d), d)
+    print(f"ESPN mapping for matchup {period}: scoring periods {scoring_periods}")
+    if sp_date and scoring_periods[0] in sp_date:
+        first = sp_date[scoring_periods[0]]
+        sunday = first + timedelta(days=(6 - first.weekday()) % 7)
+        end = max([sunday] + [sp_date[s] for s in scoring_periods if s in sp_date])
+        extra = [s for s, d in sp_date.items() if first <= d <= end]
+        scoring_periods = sorted(set(scoring_periods) | set(extra))
+        print(f"Using {first} → {end}: scoring periods {scoring_periods}")
 
     # NBA games per pro team, split into total and remaining (scoring period >= today)
     games = {}
@@ -453,7 +477,7 @@ function renderList(side, el) {
   el.innerHTML = ps.map(p => {
     const on = start[side].has(p.id), w = weekly(p), g = gamesOf(p);
     const slot = p.slot === IR ? "IR" : on ? (a.map[p.id] || "??") : "BE";
-    const inj = p.injury && p.injury !== "ACTIVE" ? `<span class="inj">${p.injury.replace("_"," ").replace("DAY TO DAY","DTD")}</span>` : "";
+    const inj = p.injury && p.injury !== "ACTIVE" ? `<span class="inj">${p.injury.replace(/_/g," ").replace("DAY TO DAY","DTD")}</span>` : "";
     const line = g ? `${w.PTS.toFixed(0)} pts · ${w.REB.toFixed(0)} reb · ${w.AST.toFixed(0)} ast · ${w.STL.toFixed(1)} stl · ${w.BLK.toFixed(1)} blk · ${w["3PM"].toFixed(1)} 3pm` : "no games counted";
     return `<div class="pl ${on ? "start" : "bench"}" data-side="${side}" data-id="${p.id}">
       <div class="slot">${slot}</div>
