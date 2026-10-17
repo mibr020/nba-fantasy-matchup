@@ -1,0 +1,39 @@
+# Save as .github/workflows/matchup.yml in a GitHub repo alongside matchup.py.
+# Repo Settings → Secrets → Actions: add ESPN_S2, ESPN_SWID (and ESPN_TEAM_ID if auto-detect fails).
+# Repo Settings → Pages → Source: "GitHub Actions".
+# Trigger from the GitHub mobile app (Actions → Matchup → Run workflow), or it runs daily on its own.
+name: Matchup
+on:
+  workflow_dispatch:
+    inputs:
+      week:
+        description: "Matchup period (blank = current)"
+        required: false
+  schedule:
+    - cron: "0 18 * * *"   # 7am NZDT daily
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install requests
+      - env:
+          ESPN_S2: ${{ secrets.ESPN_S2 }}
+          ESPN_SWID: ${{ secrets.ESPN_SWID }}
+          ESPN_TEAM_ID: ${{ secrets.ESPN_TEAM_ID }}
+        run: |
+          mkdir -p site
+          python matchup.py --no-open --out site/index.html ${{ github.event.inputs.week && format('--week {0}', github.event.inputs.week) || '' }}
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - id: deploy
+        uses: actions/deploy-pages@v4
