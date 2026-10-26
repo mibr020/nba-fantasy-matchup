@@ -134,37 +134,66 @@ def league_cats(settings):
     return cats
 
 
-def matchup_games(pro, scoring_periods, today_sp, period):
-    """Games per pro team in this matchup (total and from today on)."""
+def _et():
     try:
         from zoneinfo import ZoneInfo
-        et = ZoneInfo("America/New_York")
+        return ZoneInfo("America/New_York")
     except Exception:
-        et = timezone(timedelta(hours=-4))
-    sp_date = {}
+        return timezone(timedelta(hours=-4))
+
+
+def matchup_games(pro, mapping, period):
+    """Games per pro team in this matchup (total and from today on), counted by game date.
+
+    ESPN's matchupPeriods mapping isn't reliable for this: in some leagues it lists daily
+    scoring periods, in others (weekly-lineup leagues) it looks like NBA week numbers,
+    e.g. matchup 2 -> [2]. So the window is worked out from real game dates instead.
+    """
+    et = _et()
+    team_dates, sp_date = {}, {}
     for t in pro["settings"]["proTeams"]:
+        ds = []
         for sp, gl in (t.get("proGamesByScoringPeriod") or {}).items():
+            if int(sp) < 1:
+                continue
             for g in gl:
                 if g.get("date"):
                     d = datetime.fromtimestamp(g["date"] / 1000, et).date()
+                    ds.append(d)
                     sp_date[int(sp)] = min(sp_date.get(int(sp), d), d)
-    print(f"  ESPN mapping for matchup {period}: scoring periods {scoring_periods}")
-    # ESPN matchups end on a Sunday (US Eastern). If the mapping comes back short
-    # (seen pre-season: matchup 1 -> opening day only), extend it by game date.
-    if sp_date and scoring_periods[0] in sp_date:
-        first = sp_date[scoring_periods[0]]
-        sunday = first + timedelta(days=(6 - first.weekday()) % 7)
-        end = max([sunday] + [sp_date[s] for s in scoring_periods if s in sp_date])
-        extra = [s for s, d in sp_date.items() if first <= d <= end]
-        scoring_periods = sorted(set(scoring_periods) | set(extra))
-        print(f"  Using {first} → {end}: scoring periods {scoring_periods}")
+        team_dates[t["id"]] = ds
+    print(f"  ESPN mapping for matchup {period}: {mapping}")
+    if not sp_date:
+        raise RuntimeError("NBA schedule came back empty")
+
+    opener = min(sp_date.values())
+    week1_end = opener + timedelta(days=(6 - opener.weekday()) % 7)   # first Sunday
+
+    def nba_week(w):
+        if w <= 1:
+            return opener, week1_end
+        s = week1_end + timedelta(days=1 + 7 * (w - 2))
+        return s, s + timedelta(days=6)
+
+    m = sorted(int(x) for x in mapping)
+    daily = len(m) >= 4 and m == list(range(m[0], m[-1] + 1))
+    if daily:  # daily scoring periods are consecutive days from opening night (sp 1)
+        dof = lambda sp: sp_date.get(sp, opener + timedelta(days=sp - 1))
+        first = dof(m[0])
+        start, end = first, max(dof(m[-1]), first + timedelta(days=(6 - first.weekday()) % 7))
+    else:  # treat as NBA week numbers (2-week playoff rounds come through as two weeks)
+        start, end = nba_week(m[0])[0], nba_week(m[-1])[1]
+    today = datetime.now(et).date()
+    print(f"  Matchup {period} window {start} → {end} ({'daily ids' if daily else 'week ids'}); today {today}")
+
     games = {}
     for t in pro["settings"]["proTeams"]:
-        by_sp = t.get("proGamesByScoringPeriod") or {}
-        total = sum(len(by_sp.get(str(sp), [])) for sp in scoring_periods)
-        rem = sum(len(by_sp.get(str(sp), [])) for sp in scoring_periods if sp >= today_sp)
-        games[t["id"]] = {"total": total, "remaining": rem, "abbrev": t.get("abbrev", "")}
-    return games, scoring_periods
+        ds = [d for d in team_dates.get(t["id"], []) if start <= d <= end]
+        games[t["id"]] = {"total": len(ds), "remaining": sum(d >= today for d in ds),
+                          "abbrev": t.get("abbrev", "")}
+    print("  Games: " + ", ".join(f"{g['abbrev']} {g['total']}" for g in
+                                    sorted(games.values(), key=lambda g: g["abbrev"]) if g["abbrev"]))
+    return games
 
 
 def team_name(t):
@@ -177,9 +206,7 @@ def build_league(league, pro, week_override=None):
     lid = league.get("id")
     period = int(week_override or status.get("currentMatchupPeriod") or 1)
     sp_map = settings["scheduleSettings"]["matchupPeriods"]
-    scoring_periods = [int(x) for x in sp_map[str(period)]]
-    today_sp = int(league.get("scoringPeriodId") or status.get("latestScoringPeriod") or scoring_periods[0])
-    games, scoring_periods = matchup_games(pro, scoring_periods, today_sp, period)
+    games = matchup_games(pro, sp_map[str(period)], period)
 
     def roster(t):
         rows = []
